@@ -132,9 +132,9 @@ jobs:
                 sleep 2
               fi
             fi
-            pids=$(pgrep -f '/build/worker' || true)
+            pids=$(pgrep -f "$DEPLOY_TARGET/build/worker" || true)
             if [ -n "$pids" ]; then kill $pids || true; sleep 2; fi
-            pids=$(pgrep -f '/build/worker' || true)
+            pids=$(pgrep -f "$DEPLOY_TARGET/build/worker" || true)
             if [ -n "$pids" ]; then kill -9 $pids || true; sleep 1; fi
             mkdir -p build
             rm -f build/worker || true
@@ -161,15 +161,12 @@ jobs:
             chmod +x build/worker
             if [ -x "$PM2_BIN" ]; then
               set -a; [ -f .env ] && . ./.env; set +a
-              if "$PM2_BIN" describe getresale-worker >/dev/null 2>&1; then
-                "$PM2_BIN" reload getresale-worker --update-env
-              else
-                "$PM2_BIN" start ./build/worker --name getresale-worker --cwd "$DEPLOY_TARGET"
-              fi
-              "$PM2_BIN" save
+              if "$PM2_BIN" describe getresale-worker >/dev/null 2>&1; then "$PM2_BIN" reload getresale-worker --update-env || true; else "$PM2_BIN" start ./build/worker --name getresale-worker --cwd "$DEPLOY_TARGET" || true; fi
+              "$PM2_BIN" save || true
             else
               set -a; [ -f .env ] && . ./.env; set +a
               # Garante que logs/ existe antes de escrever
               mkdir -p logs
               nohup ./build/worker > logs/worker.out 2>&1 &
             fi
+            echo "DEPLOY_OK"
