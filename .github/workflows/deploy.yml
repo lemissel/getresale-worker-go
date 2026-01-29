@@ -161,7 +161,11 @@ jobs:
             chmod +x build/worker
             if [ -x "$PM2_BIN" ]; then
               set -a; [ -f .env ] && . ./.env; set +a
-              if "$PM2_BIN" describe getresale-worker >/dev/null 2>&1; then "$PM2_BIN" reload getresale-worker --update-env || true; else "$PM2_BIN" start ./build/worker --name getresale-worker --cwd "$DEPLOY_TARGET" || true; fi
+              if "$PM2_BIN" describe getresale-worker >/dev/null 2>&1; then
+                "$PM2_BIN" restart getresale-worker --update-env || true
+              else
+                "$PM2_BIN" start ./build/worker --name getresale-worker --cwd "$DEPLOY_TARGET" || true
+              fi
               "$PM2_BIN" save || true
             else
               set -a; [ -f .env ] && . ./.env; set +a
