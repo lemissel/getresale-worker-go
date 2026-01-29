@@ -95,6 +95,37 @@ jobs:
             fi
             mkdir -p "$DEPLOY_TARGET"
             cd "$DEPLOY_TARGET" || { echo "Falha ao acessar $DEPLOY_TARGET"; exit 1; }
+            # Garantir PATH com /usr/local/bin (onde pm2 costuma estar)
+            export PATH="$PATH:/usr/local/bin"
+            PM2_BIN="$(command -v pm2 || echo /usr/local/bin/pm2)"
+            # Instalar pm2 se não existir
+            if [ ! -x "$PM2_BIN" ]; then
+              echo "pm2 não encontrado. Instalando Node e pm2..."
+              if ! command -v npm >/dev/null 2>&1; then
+                ARCH=$(uname -m)
+                case "$ARCH" in
+                  x86_64) NODE_ARCH="x64" ;;
+                  aarch64) NODE_ARCH="arm64" ;;
+                  armv7l) NODE_ARCH="armv7l" ;;
+                  *) echo "Arquitetura não suportada: $ARCH"; exit 1 ;;
+                esac
+                NODE_VERSION="20.12.2"
+                TMP_DIR=$(mktemp -d)
+                cd "$TMP_DIR"
+                curl -fsSL "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-linux-$NODE_ARCH.tar.xz" -o node.tar.xz
+                tar -xJf node.tar.xz
+                if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; else SUDO=""; fi
+                $SUDO rm -rf /usr/local/node-v$NODE_VERSION 2>/dev/null || true
+                $SUDO mv "node-v$NODE_VERSION-linux-$NODE_ARCH" "/usr/local/node-v$NODE_VERSION"
+                $SUDO ln -sf "/usr/local/node-v$NODE_VERSION/bin/node" /usr/local/bin/node
+                $SUDO ln -sf "/usr/local/node-v$NODE_VERSION/bin/npm" /usr/local/bin/npm
+                $SUDO ln -sf "/usr/local/node-v$NODE_VERSION/bin/npx" /usr/local/bin/npx
+                cd - >/dev/null
+                export PATH="/usr/local/node-v$NODE_VERSION/bin:$PATH"
+              fi
+              npm i -g pm2
+              PM2_BIN="$(command -v pm2 || echo /usr/local/bin/pm2)"
+            fi
             if command -v pm2 >/dev/null 2>&1; then
               if pm2 describe getresale-worker >/dev/null 2>&1; then
                 pm2 stop getresale-worker || true
@@ -128,14 +159,14 @@ jobs:
               exit 1
             fi
             chmod +x build/worker
-            if command -v pm2 >/dev/null 2>&1; then
+            if [ -x "$PM2_BIN" ]; then
               set -a; [ -f .env ] && . ./.env; set +a
-              if pm2 describe getresale-worker >/dev/null 2>&1; then
-                pm2 reload getresale-worker --update-env
+              if "$PM2_BIN" describe getresale-worker >/dev/null 2>&1; then
+                "$PM2_BIN" reload getresale-worker --update-env
               else
-                pm2 start ./build/worker --name getresale-worker --cwd "$DEPLOY_TARGET"
+                "$PM2_BIN" start ./build/worker --name getresale-worker --cwd "$DEPLOY_TARGET"
               fi
-              pm2 save
+              "$PM2_BIN" save
             else
               set -a; [ -f .env ] && . ./.env; set +a
               # Garante que logs/ existe antes de escrever
