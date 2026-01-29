@@ -95,12 +95,11 @@ jobs:
             fi
             mkdir -p "$DEPLOY_TARGET"
             cd "$DEPLOY_TARGET" || { echo "Falha ao acessar $DEPLOY_TARGET"; exit 1; }
-            # Garantir PATH com /usr/local/bin (onde pm2 costuma estar)
-            export PATH="$PATH:/usr/local/bin"
-            PM2_BIN="$(command -v pm2 || echo /usr/local/bin/pm2)"
-            # Instalar pm2 se não existir
-            if [ ! -x "$PM2_BIN" ]; then
-              echo "pm2 não encontrado. Instalando Node e pm2..."
+            export NVM_DIR="$HOME/.nvm"
+            if [ -s "$NVM_DIR/nvm.sh" ]; then . "$NVM_DIR/nvm.sh"; fi
+            PM2_BIN="$(command -v pm2 || true)"
+            if [ -z "$PM2_BIN" ]; then
+              export PATH="$PATH:/usr/local/bin"
               if ! command -v npm >/dev/null 2>&1; then
                 ARCH=$(uname -m)
                 case "$ARCH" in
@@ -124,11 +123,11 @@ jobs:
                 export PATH="/usr/local/node-v$NODE_VERSION/bin:$PATH"
               fi
               npm i -g pm2
-              PM2_BIN="$(command -v pm2 || echo /usr/local/bin/pm2)"
+              PM2_BIN="$(command -v pm2 || true)"
             fi
-            if command -v pm2 >/dev/null 2>&1; then
-              if pm2 describe getresale-worker >/dev/null 2>&1; then
-                pm2 stop getresale-worker || true
+            if [ -n "$PM2_BIN" ]; then
+              if "$PM2_BIN" describe getresale-worker >/dev/null 2>&1; then
+                "$PM2_BIN" stop getresale-worker || true
                 sleep 2
               fi
             fi
@@ -159,7 +158,7 @@ jobs:
               exit 1
             fi
             chmod +x build/worker
-            if [ -x "$PM2_BIN" ]; then
+            if [ -n "$PM2_BIN" ]; then
               set -a; [ -f .env ] && . ./.env; set +a
               if "$PM2_BIN" describe getresale-worker >/dev/null 2>&1; then
                 "$PM2_BIN" restart getresale-worker --update-env || true
