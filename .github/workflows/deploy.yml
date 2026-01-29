@@ -95,13 +95,18 @@ jobs:
             fi
             mkdir -p "$DEPLOY_TARGET"
             cd "$DEPLOY_TARGET" || { echo "Falha ao acessar $DEPLOY_TARGET"; exit 1; }
-            # Para evitar 'Text file busy' ao sobrescrever o binário, pare o processo se estiver rodando
             if command -v pm2 >/dev/null 2>&1; then
               if pm2 describe getresale-worker >/dev/null 2>&1; then
-                echo "Parando processo pm2 getresale-worker antes de copiar novos arquivos..."
                 pm2 stop getresale-worker || true
+                sleep 2
               fi
             fi
+            pids=$(pgrep -f '/build/worker' || true)
+            if [ -n "$pids" ]; then kill $pids || true; sleep 2; fi
+            pids=$(pgrep -f '/build/worker' || true)
+            if [ -n "$pids" ]; then kill -9 $pids || true; sleep 1; fi
+            mkdir -p build
+            rm -f build/worker || true
             if [ -d worker_build ]; then
               cp -a worker_build/. .
               rm -rf worker_build
