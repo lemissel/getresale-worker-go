@@ -107,6 +107,14 @@ jobs:
             fi
             if [ -f .env.production ]; then cp -f .env.production .env; fi
             if [ -f .env ]; then echo "Arquivo .env presente"; else echo "ATENÇÃO: .env não foi criado"; fi
+            # Garantir diretório de logs
+            mkdir -p logs
+            # Validar binário
+            if [ ! -f build/worker ]; then
+              echo "Erro: binário build/worker não encontrado"
+              ls -la build || true
+              exit 1
+            fi
             chmod +x build/worker
             if command -v pm2 >/dev/null 2>&1; then
               set -a; [ -f .env ] && . ./.env; set +a
@@ -118,5 +126,7 @@ jobs:
               pm2 save
             else
               set -a; [ -f .env ] && . ./.env; set +a
+              # Garante que logs/ existe antes de escrever
+              mkdir -p logs
               nohup ./build/worker > logs/worker.out 2>&1 &
             fi
