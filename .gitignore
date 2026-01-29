@@ -1,1 +1,17 @@
 .env
+.env.*
+!.env.example
+
+bin/
+build/
+dist/
+coverage/
+logs/
+*.log
+
+.DS_Store
+.idea/
+.vscode/
+
+*.test
+*.out
