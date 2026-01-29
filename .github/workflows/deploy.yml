@@ -1,0 +1,122 @@
+name: Deploy Worker Go
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: true
+
+      - name: Create .env file from GitHub Secret
+        run: |
+          echo "${{ secrets.PRODUCTION_ENV_FILE }}" > .env.production
+          if [ ! -s .env.production ]; then echo "Missing PRODUCTION_ENV_FILE secret or empty content"; exit 1; fi
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build binary
+        run: |
+          mkdir -p build
+          go build -o build/worker ./main.go
+
+      - name: Prepare deploy folder
+        run: |
+          mkdir -p deploy_out
+          cp .env.production deploy_out/
+          cp -r build deploy_out/
+          cp go.mod deploy_out/
+          cp go.sum deploy_out/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker-go-build
+          path: deploy_out
+
+  deploy:
+    name: Deploy to VPS
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: worker-go-build
+          path: worker_build
+
+      - name: List artifact contents
+        run: |
+          ls -la worker_build || true
+          if [ -z "$(ls -A worker_build 2>/dev/null)" ]; then
+            echo "Error: worker_build is empty after download-artifact";
+            exit 1;
+          fi
+
+      - name: Upload to VPS via SCP
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          source: worker_build/**,worker_build/.env.production,worker_build/.env
+          target: ${{ secrets.DEPLOY_TARGET }}
+          debug: true
+
+      - name: Start/Reload app via SSH
+        uses: appleboy/ssh-action@v0.1.7
+        env:
+          DEPLOY_TARGET: ${{ secrets.DEPLOY_TARGET }}
+          PRODUCTION_ENV_FILE: ${{ secrets.PRODUCTION_ENV_FILE }}
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: 22
+          envs: DEPLOY_TARGET,PRODUCTION_ENV_FILE
+          script: |
+            set -e
+            if [ -z "$DEPLOY_TARGET" ]; then
+              echo "DEPLOY_TARGET vazio."; exit 1;
+            fi
+            mkdir -p "$DEPLOY_TARGET"
+            cd "$DEPLOY_TARGET" || { echo "Falha ao acessar $DEPLOY_TARGET"; exit 1; }
+            if [ -d worker_build ]; then
+              cp -a worker_build/. .
+              rm -rf worker_build
+            fi
+            if [ -f .env.production ]; then echo "Encontrado .env.production"; else echo "ATENÇÃO: .env.production não encontrado"; fi
+            if [ ! -f .env.production ]; then
+              if [ -n "$PRODUCTION_ENV_FILE" ]; then
+                printf "%s" "$PRODUCTION_ENV_FILE" > .env.production
+              fi
+            fi
+            if [ -f .env.production ]; then cp -f .env.production .env; fi
+            if [ -f .env ]; then echo "Arquivo .env presente"; else echo "ATENÇÃO: .env não foi criado"; fi
+            chmod +x build/worker
+            if command -v pm2 >/dev/null 2>&1; then
+              set -a; [ -f .env ] && . ./.env; set +a
+              if pm2 describe getresale-worker >/dev/null 2>&1; then
+                pm2 reload getresale-worker --update-env
+              else
+                pm2 start ./build/worker --name getresale-worker --cwd "$DEPLOY_TARGET"
+              fi
+              pm2 save
+            else
+              set -a; [ -f .env ] && . ./.env; set +a
+              nohup ./build/worker > logs/worker.out 2>&1 &
+            fi
