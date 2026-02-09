@@ -25,6 +25,19 @@ func main() {
 		log.Println("No .env file found, using system environment variables")
 	}
 
+	// Inicializar OpenTelemetry
+	shutdown, err := InitTracer("getresale-worker-go", "localhost:4317")
+	if err != nil {
+		log.Printf("Failed to initialize OpenTelemetry: %v", err)
+	} else {
+		defer func() {
+			if err := shutdown(context.Background()); err != nil {
+				log.Printf("Failed to shutdown OpenTelemetry: %v", err)
+			}
+		}()
+		log.Println("OpenTelemetry initialized")
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
