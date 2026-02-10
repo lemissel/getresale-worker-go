@@ -9,21 +9,19 @@ import (
 	"getresale-worker-go/internal/llm"
 	"getresale-worker-go/internal/models"
 	"getresale-worker-go/internal/queue"
-
-	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
 
 type Worker struct {
-	SQS       *queue.SQSManager
+	Queue     *queue.RedisManager
 	Ollama    llm.Client
 	OpenAI    llm.Client
 	Semaphore chan struct{}
 	Wg        sync.WaitGroup
 }
 
-func NewWorker(sqs *queue.SQSManager, ollama, openai llm.Client, maxConcurrency int) *Worker {
+func NewWorker(queueManager *queue.RedisManager, ollama, openai llm.Client, maxConcurrency int) *Worker {
 	return &Worker{
-		SQS:       sqs,
+		Queue:     queueManager,
 		Ollama:    ollama,
 		OpenAI:    openai,
 		Semaphore: make(chan struct{}, maxConcurrency),
@@ -39,7 +37,7 @@ func (w *Worker) Start(ctx context.Context) {
 			w.Wg.Wait()
 			return
 		default:
-			messages, err := w.SQS.ReceiveMessages(ctx)
+			messages, err := w.Queue.ReceiveMessages(ctx)
 			if err != nil {
 				log.Printf("Error receiving messages: %v\n", err)
 				continue
@@ -53,7 +51,7 @@ func (w *Worker) Start(ctx context.Context) {
 	}
 }
 
-func (w *Worker) handleMessage(ctx context.Context, msg types.Message) {
+func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) {
 	defer w.Wg.Done()
 
 	// Acquire semaphore
@@ -61,14 +59,16 @@ func (w *Worker) handleMessage(ctx context.Context, msg types.Message) {
 	defer func() { <-w.Semaphore }()
 
 	var job models.Job
-	if err := json.Unmarshal([]byte(*msg.Body), &job); err != nil {
+	if err := json.Unmarshal([]byte(msg.Body), &job); err != nil {
 		log.Printf("Error unmarshaling job: %v\n", err)
+		_ = w.Queue.FailJob(ctx, msg.JobID, "invalid job payload")
 		return
 	}
 
 	var payload models.LLMPayload
 	if err := json.Unmarshal(job.Payload, &payload); err != nil {
 		log.Printf("Error unmarshaling payload: %v\n", err)
+		_ = w.Queue.FailJob(ctx, msg.JobID, "invalid llm payload")
 		return
 	}
 
@@ -93,17 +93,16 @@ func (w *Worker) handleMessage(ctx context.Context, msg types.Message) {
 	if err != nil {
 		log.Printf("Error processing job %s: %v\n", job.JobId, err)
 		jobResult.Error = err.Error()
-		// We DON'T delete the message from SQS here so it can be retried or sent to DLQ
+		_ = w.Queue.FailJob(ctx, msg.JobID, err.Error())
 	} else {
 		jobResult.Result = result
-		// Send success result
-		if err := w.SQS.SendResult(ctx, jobResult); err != nil {
+		if err := w.Queue.SendResult(ctx, msg.JobID, jobResult); err != nil {
 			log.Printf("Error sending result for job %s: %v\n", job.JobId, err)
+			_ = w.Queue.FailJob(ctx, msg.JobID, "failed to enqueue output")
 			return
 		}
-		// Delete message from SQS
-		if err := w.SQS.DeleteMessage(ctx, *msg.ReceiptHandle); err != nil {
-			log.Printf("Error deleting message %s: %v\n", job.JobId, err)
+		if err := w.Queue.CompleteJob(ctx, msg.JobID, result); err != nil {
+			log.Printf("Error completing job %s: %v\n", job.JobId, err)
 		}
 		log.Printf("Job %s completed successfully.\n", job.JobId)
 	}

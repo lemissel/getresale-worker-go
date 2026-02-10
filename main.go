@@ -12,9 +12,8 @@ import (
 	"getresale-worker-go/internal/queue"
 	"getresale-worker-go/internal/worker"
 
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/joho/godotenv"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -28,17 +27,26 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Load AWS Config
-	cfg, err := config.LoadDefaultConfig(ctx)
-	if err != nil {
-		log.Fatalf("unable to load SDK config, %v", err)
+	// Env variables
+	redisHost := os.Getenv("REDIS_HOST")
+	if redisHost == "" {
+		redisHost = "localhost"
+	}
+	redisPort := os.Getenv("REDIS_PORT")
+	if redisPort == "" {
+		redisPort = "6379"
+	}
+	redisPassword := os.Getenv("REDIS_PASSWORD")
+	redisDBStr := os.Getenv("REDIS_DB")
+	redisDB := 0
+	if redisDBStr != "" {
+		if value, err := strconv.Atoi(redisDBStr); err == nil && value >= 0 {
+			redisDB = value
+		}
 	}
 
-	sqsClient := sqs.NewFromConfig(cfg)
-
-	// Env variables
-	inputQueue := os.Getenv("SQS_INPUT_QUEUE_URL")
-	outputQueue := os.Getenv("SQS_OUTPUT_QUEUE_URL")
+	inputQueue := os.Getenv("REDIS_INPUT_QUEUE")
+	outputQueue := os.Getenv("REDIS_OUTPUT_QUEUE")
 	ollamaURL := os.Getenv("OLLAMA_HOST")
 	if ollamaURL == "" {
 		ollamaURL = "http://localhost:11434"
@@ -46,23 +54,39 @@ func main() {
 	openAIKey := os.Getenv("OPENAI_API_KEY")
 	openAIBaseURL := os.Getenv("OPENAI_BASE_URL")
 
-	maxConcurrencyStr := os.Getenv("SQS_MAX_CONCURRENCY")
+	maxConcurrencyStr := os.Getenv("REDIS_MAX_CONCURRENCY")
 	maxConcurrency, err := strconv.Atoi(maxConcurrencyStr)
 	if err != nil || maxConcurrency <= 0 {
 		maxConcurrency = 5 // Default
 	}
 
 	if inputQueue == "" || outputQueue == "" {
-		log.Fatal("SQS_INPUT_QUEUE_URL and SQS_OUTPUT_QUEUE_URL must be set")
+		log.Fatal("REDIS_INPUT_QUEUE and REDIS_OUTPUT_QUEUE must be set")
 	}
 
 	// Clients
-	sqsManager := queue.NewSQSManager(sqsClient, inputQueue, outputQueue)
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:     redisHost + ":" + redisPort,
+		Password: redisPassword,
+		DB:       redisDB,
+	})
+	redisPrefix := os.Getenv("REDIS_PREFIX")
+	workerID := os.Getenv("WORKER_ID")
+	if workerID == "" {
+		hostname, err := os.Hostname()
+		if err != nil {
+			workerID = "worker"
+		} else {
+			workerID = hostname
+		}
+		workerID = workerID + ":" + strconv.Itoa(os.Getpid())
+	}
+	redisManager := queue.NewRedisManager(redisClient, inputQueue, outputQueue, workerID, redisPrefix)
 	ollamaClient := llm.NewOllamaClient(ollamaURL)
 	openAIClient := llm.NewOpenAIClient(openAIKey, openAIBaseURL)
 
 	// Worker
-	w := worker.NewWorker(sqsManager, ollamaClient, openAIClient, maxConcurrency)
+	w := worker.NewWorker(redisManager, ollamaClient, openAIClient, maxConcurrency)
 
 	// Start
 	w.Start(ctx)
