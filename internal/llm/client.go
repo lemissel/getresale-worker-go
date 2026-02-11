@@ -2,6 +2,7 @@ package llm
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,7 +11,7 @@ import (
 )
 
 type Client interface {
-	Generate(model, prompt, format string) (string, error)
+	Generate(ctx context.Context, model, prompt, format string) (string, error)
 }
 
 // OllamaClient
@@ -37,7 +38,7 @@ type ollamaResponse struct {
 	Response string `json:"response"`
 }
 
-func (c *OllamaClient) Generate(model, prompt, format string) (string, error) {
+func (c *OllamaClient) Generate(ctx context.Context, model, prompt, format string) (string, error) {
 	reqBody := ollamaRequest{
 		Model:  model,
 		Prompt: prompt,
@@ -46,7 +47,13 @@ func (c *OllamaClient) Generate(model, prompt, format string) (string, error) {
 	}
 	data, _ := json.Marshal(reqBody)
 
-	resp, err := c.HTTP.Post(fmt.Sprintf("%s/api/generate", c.BaseURL), "application/json", bytes.NewBuffer(data))
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/api/generate", c.BaseURL), bytes.NewBuffer(data))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -101,7 +108,7 @@ type openAIResponse struct {
 	Choices []openAIChoice `json:"choices"`
 }
 
-func (c *OpenAIClient) Generate(model, prompt, format string) (string, error) {
+func (c *OpenAIClient) Generate(ctx context.Context, model, prompt, format string) (string, error) {
 	reqBody := openAIRequest{
 		Model: model,
 		Messages: []openAIMessage{
@@ -110,7 +117,7 @@ func (c *OpenAIClient) Generate(model, prompt, format string) (string, error) {
 	}
 	data, _ := json.Marshal(reqBody)
 
-	req, _ := http.NewRequest("POST", fmt.Sprintf("%s/chat/completions", c.BaseURL), bytes.NewBuffer(data))
+	req, _ := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/chat/completions", c.BaseURL), bytes.NewBuffer(data))
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.APIKey))
 	req.Header.Set("Content-Type", "application/json")
 

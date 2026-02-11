@@ -79,9 +79,9 @@ func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) {
 
 	// Decide which client to use
 	if payload.Model == "whisper-1" || payload.Model == "gpt-4o" || payload.Model == "gpt-4" {
-		result, err = w.OpenAI.Generate(payload.Model, payload.Prompt, payload.Format)
+		result, err = w.OpenAI.Generate(ctx, payload.Model, payload.Prompt, payload.Format)
 	} else {
-		result, err = w.Ollama.Generate(payload.Model, payload.Prompt, payload.Format)
+		result, err = w.Ollama.Generate(ctx, payload.Model, payload.Prompt, payload.Format)
 	}
 
 	jobResult := models.JobResult{

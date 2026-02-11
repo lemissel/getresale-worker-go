@@ -4,6 +4,7 @@ go 1.23.9
 
 require (
 	github.com/joho/godotenv v1.5.1
+	github.com/lib/pq v1.11.2
 	github.com/redis/go-redis/v9 v9.11.0
 )
 

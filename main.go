@@ -60,6 +60,11 @@ func main() {
 		maxConcurrency = 5 // Default
 	}
 
+	ollamaModel := os.Getenv("OLLAMA_MODEL")
+	if ollamaModel == "" {
+		ollamaModel = "llama3.2" // Default to a commonly available model or fallback
+	}
+
 	if inputQueue == "" || outputQueue == "" {
 		log.Fatal("REDIS_INPUT_QUEUE and REDIS_OUTPUT_QUEUE must be set")
 	}
@@ -87,6 +92,18 @@ func main() {
 
 	// Worker
 	w := worker.NewWorker(redisManager, ollamaClient, openAIClient, maxConcurrency)
+
+	// Opportunity Worker
+	oppQueueName := "opportunity_analysis_queue"
+	// Output queue for LLM results (consumed by NestJS)
+	oppOutputQueue := "LLM_OUTPUT"
+	oppRedisManager := queue.NewRedisManager(redisClient, oppQueueName, oppOutputQueue, workerID+"-opp", redisPrefix)
+
+	// Opportunity Worker no longer needs DB, just Ollama
+	oppWorker := worker.NewOpportunityWorker(oppRedisManager, ollamaClient, maxConcurrency, ollamaModel)
+
+	// Start Opportunity Worker
+	go oppWorker.Start(ctx)
 
 	// Start
 	w.Start(ctx)
