@@ -131,7 +131,7 @@ OUTPUT JSON FORMAT: { 'executive_summary': 'string (in Portuguese)', 'mood': 'Ne
 
 	fullPrompt := fmt.Sprintf("%s\n\nAVAILABLE SERVICES:\n%s\n\nTRANSCRIPT (Context):\n%s", systemPrompt, string(servicesJSON), transcript)
 
-	timeoutCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
 	model := w.ModelName
