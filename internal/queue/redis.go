@@ -40,7 +40,7 @@ func NewRedisManager(client *redis.Client, inputQueue, outputQueue string, worke
 }
 
 func (m *RedisManager) ReceiveMessages(ctx context.Context) ([]Message, error) {
-	waitKey := m.queueKey(m.InputQueue, "wait")
+	waitKey := m.queueKey(m.InputQueue, "waiting")
 	activeKey := m.queueKey(m.InputQueue, "active")
 	jobID, err := m.Client.BRPopLPush(ctx, waitKey, activeKey, m.BlockTimeout).Result()
 	if err == redis.Nil {
@@ -105,23 +105,23 @@ func (m *RedisManager) SendResult(ctx context.Context, jobID string, result inte
 		return err
 	}
 	// For result queue, we should probably generate a NEW job ID
-	// Because if we reuse the input job ID, we might conflict if the output queue 
+	// Because if we reuse the input job ID, we might conflict if the output queue
 	// uses the same prefix/namespace and the job ID already exists (though keys include queue name).
 	// However, usually result queue is a separate queue.
 	// But if we use the same JobID '10' for input queue 'A' and output queue 'B',
 	// the keys are distinct: bull:A:10 vs bull:B:10. So it should be fine.
-	
+
 	// BUT, wait. The user said HGETALL returned nil.
 	// Check how jobKey is constructed: prefix:queueName:jobID
 	// bull:LLM_OUTPUT:32f06a13-f338-4694-b2f5-6e306aba6a50
-	
+
 	// The OpportunityWorker uses the Redis JobID (from BullMQ) for the result.
 	// In the log: "Job 10 completed successfully." -> This 10 is likely the BullMQ ID.
 	// But the user checked a UUID: 32f06a13...
 	// Ah! The Input Job ID might be '10' (BullMQ counter), but the Message ID inside is UUID.
-	
+
 	// Let's verify what ID we are passing to SendResult in OpportunityWorker.
-	
+
 	return m.addJob(ctx, m.OutputQueue, jobID, data)
 }
 
@@ -136,7 +136,7 @@ func (m *RedisManager) addJob(ctx context.Context, queueName string, jobID strin
 	).Err(); err != nil {
 		return err
 	}
-	return m.Client.RPush(ctx, m.queueKey(queueName, "wait"), jobID).Err()
+	return m.Client.RPush(ctx, m.queueKey(queueName, "waiting"), jobID).Err()
 }
 
 func (m *RedisManager) lockJob(ctx context.Context, queueName string, jobID string) error {
