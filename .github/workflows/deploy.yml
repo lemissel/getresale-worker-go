@@ -173,3 +173,7 @@ jobs:
               nohup ./build/worker > logs/worker.out 2>&1 &
             fi
             echo "DEPLOY_OK"
+      - name: Delete artifact
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: worker-go-build
