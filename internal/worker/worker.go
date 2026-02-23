@@ -13,16 +13,16 @@ import (
 
 type Worker struct {
 	Queue     *queue.RedisManager
-	Ollama    llm.Client
+	Gemini    llm.Client
 	OpenAI    llm.Client
 	Semaphore chan struct{}
 	Wg        sync.WaitGroup
 }
 
-func NewWorker(queueManager *queue.RedisManager, ollama, openai llm.Client, maxConcurrency int) *Worker {
+func NewWorker(queueManager *queue.RedisManager, gemini, openai llm.Client, maxConcurrency int) *Worker {
 	return &Worker{
 		Queue:     queueManager,
-		Ollama:    ollama,
+		Gemini:    gemini,
 		OpenAI:    openai,
 		Semaphore: make(chan struct{}, maxConcurrency),
 	}
@@ -53,7 +53,6 @@ func (w *Worker) Start(ctx context.Context) {
 
 func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) {
 	defer w.Wg.Done()
-
 	// Acquire semaphore
 	w.Semaphore <- struct{}{}
 	defer func() { <-w.Semaphore }()
@@ -81,7 +80,8 @@ func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) {
 	if payload.Model == "whisper-1" || payload.Model == "gpt-4o" || payload.Model == "gpt-4" {
 		result, err = w.OpenAI.Generate(ctx, payload.Model, payload.Prompt, payload.Format)
 	} else {
-		result, err = w.Ollama.Generate(ctx, payload.Model, payload.Prompt, payload.Format)
+		// Default to Gemini for everything else (replacing Llama)
+		result, err = w.Gemini.Generate(ctx, payload.Model, payload.Prompt, payload.Format)
 	}
 
 	jobResult := models.JobResult{

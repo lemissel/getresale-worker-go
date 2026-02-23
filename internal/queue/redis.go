@@ -25,9 +25,6 @@ type RedisManager struct {
 }
 
 func NewRedisManager(client *redis.Client, inputQueue, outputQueue string, workerID string, prefix string) *RedisManager {
-	if prefix == "" {
-		prefix = "bull"
-	}
 	return &RedisManager{
 		Client:       client,
 		InputQueue:   inputQueue,
@@ -40,63 +37,25 @@ func NewRedisManager(client *redis.Client, inputQueue, outputQueue string, worke
 }
 
 func (m *RedisManager) ReceiveMessages(ctx context.Context) ([]Message, error) {
-	waitKey := m.queueKey(m.InputQueue, "waiting")
-	activeKey := m.queueKey(m.InputQueue, "active")
-	jobID, err := m.Client.BRPopLPush(ctx, waitKey, activeKey, m.BlockTimeout).Result()
+	// Simple BLPop from the input list
+	// BLPop returns [key, value]
+	result, err := m.Client.BLPop(ctx, m.BlockTimeout, m.InputQueue).Result()
 	if err == redis.Nil {
 		return []Message{}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	data, err := m.Client.HGet(ctx, m.jobKey(m.InputQueue, jobID), "data").Result()
-	if err == redis.Nil {
-		return []Message{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := m.lockJob(ctx, m.InputQueue, jobID); err != nil {
-		return nil, err
-	}
-	if err := m.Client.HSet(ctx, m.jobKey(m.InputQueue, jobID), "processedOn", time.Now().UnixMilli()).Err(); err != nil {
-		return nil, err
-	}
-	return []Message{{JobID: jobID, Body: data}}, nil
-}
 
-func (m *RedisManager) CompleteJob(ctx context.Context, jobID string, returnValue string) error {
-	jobKey := m.jobKey(m.InputQueue, jobID)
-	if err := m.Client.HSet(ctx, jobKey, "finishedOn", time.Now().UnixMilli(), "returnvalue", returnValue).Err(); err != nil {
-		return err
-	}
-	if err := m.Client.ZAdd(ctx, m.queueKey(m.InputQueue, "completed"), redis.Z{
-		Score:  float64(time.Now().UnixMilli()),
-		Member: jobID,
-	}).Err(); err != nil {
-		return err
-	}
-	if err := m.Client.LRem(ctx, m.queueKey(m.InputQueue, "active"), 0, jobID).Err(); err != nil {
-		return err
-	}
-	return m.unlockJob(ctx, m.InputQueue, jobID)
-}
+	// result[0] is key (queue name), result[1] is value (payload)
+	payload := result[1]
 
-func (m *RedisManager) FailJob(ctx context.Context, jobID string, reason string) error {
-	jobKey := m.jobKey(m.InputQueue, jobID)
-	if err := m.Client.HSet(ctx, jobKey, "finishedOn", time.Now().UnixMilli(), "failedReason", reason).Err(); err != nil {
-		return err
-	}
-	if err := m.Client.ZAdd(ctx, m.queueKey(m.InputQueue, "failed"), redis.Z{
-		Score:  float64(time.Now().UnixMilli()),
-		Member: jobID,
-	}).Err(); err != nil {
-		return err
-	}
-	if err := m.Client.LRem(ctx, m.queueKey(m.InputQueue, "active"), 0, jobID).Err(); err != nil {
-		return err
-	}
-	return m.unlockJob(ctx, m.InputQueue, jobID)
+	// We don't have a separate JobID in simple list mode, unless it's in the payload.
+	// We'll generate a temporary ID for logging purposes or try to extract it if needed.
+	// For now, let's use a placeholder or hash of payload.
+	jobID := "list-job"
+
+	return []Message{{JobID: jobID, Body: payload}}, nil
 }
 
 func (m *RedisManager) SendResult(ctx context.Context, jobID string, result interface{}) error {
@@ -104,25 +63,21 @@ func (m *RedisManager) SendResult(ctx context.Context, jobID string, result inte
 	if err != nil {
 		return err
 	}
-	// For result queue, we should probably generate a NEW job ID
-	// Because if we reuse the input job ID, we might conflict if the output queue
-	// uses the same prefix/namespace and the job ID already exists (though keys include queue name).
-	// However, usually result queue is a separate queue.
-	// But if we use the same JobID '10' for input queue 'A' and output queue 'B',
-	// the keys are distinct: bull:A:10 vs bull:B:10. So it should be fine.
+	// Simple RPush to the output list
+	return m.Client.RPush(ctx, m.OutputQueue, data).Err()
+}
 
-	// BUT, wait. The user said HGETALL returned nil.
-	// Check how jobKey is constructed: prefix:queueName:jobID
-	// bull:LLM_OUTPUT:32f06a13-f338-4694-b2f5-6e306aba6a50
+func (m *RedisManager) CompleteJob(ctx context.Context, jobID string, returnValue string) error {
+	// In simple list mode, completion is just sending the result (handled by SendResult).
+	// This method might be redundant or can be used for logging.
+	return nil
+}
 
-	// The OpportunityWorker uses the Redis JobID (from BullMQ) for the result.
-	// In the log: "Job 10 completed successfully." -> This 10 is likely the BullMQ ID.
-	// But the user checked a UUID: 32f06a13...
-	// Ah! The Input Job ID might be '10' (BullMQ counter), but the Message ID inside is UUID.
-
-	// Let's verify what ID we are passing to SendResult in OpportunityWorker.
-
-	return m.addJob(ctx, m.OutputQueue, jobID, data)
+func (m *RedisManager) FailJob(ctx context.Context, jobID string, reason string) error {
+	// In simple list mode, we might want to push to a failed queue or just log.
+	// For now, let's just log.
+	fmt.Printf("Job %s failed: %s\n", jobID, reason)
+	return nil
 }
 
 func (m *RedisManager) addJob(ctx context.Context, queueName string, jobID string, data []byte) error {
@@ -136,7 +91,7 @@ func (m *RedisManager) addJob(ctx context.Context, queueName string, jobID strin
 	).Err(); err != nil {
 		return err
 	}
-	return m.Client.RPush(ctx, m.queueKey(queueName, "waiting"), jobID).Err()
+	return m.Client.RPush(ctx, m.queueKey(queueName, "wait"), jobID).Err()
 }
 
 func (m *RedisManager) lockJob(ctx context.Context, queueName string, jobID string) error {

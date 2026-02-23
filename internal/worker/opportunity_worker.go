@@ -16,16 +16,16 @@ import (
 
 type OpportunityWorker struct {
 	Queue     *queue.RedisManager
-	Ollama    llm.Client
+	Gemini    llm.Client
 	ModelName string
 	Semaphore chan struct{}
 	Wg        sync.WaitGroup
 }
 
-func NewOpportunityWorker(queueManager *queue.RedisManager, ollama llm.Client, maxConcurrency int, modelName string) *OpportunityWorker {
+func NewOpportunityWorker(queueManager *queue.RedisManager, gemini llm.Client, maxConcurrency int, modelName string) *OpportunityWorker {
 	return &OpportunityWorker{
 		Queue:     queueManager,
-		Ollama:    ollama,
+		Gemini:    gemini,
 		ModelName: modelName,
 		Semaphore: make(chan struct{}, maxConcurrency),
 	}
@@ -62,8 +62,16 @@ func (w *OpportunityWorker) handleMessage(ctx context.Context, msg queue.Message
 	w.Semaphore <- struct{}{}
 	defer func() { <-w.Semaphore }()
 
-	// The msg.Body is the raw JSON payload sent from NestJS (BullMQ data).
-	// It does NOT have the 'Job' envelope structure from models.Job.
+	// Parse the Job envelope first
+	var job models.Job
+	if err := json.Unmarshal([]byte(msg.Body), &job); err != nil {
+		log.Printf("Error unmarshaling job envelope: %v\n", err)
+		// Fallback for legacy raw payloads (if any exist in queue)
+		// or just fail. Given we are migrating, let's assume new format.
+		_ = w.Queue.FailJob(ctx, msg.JobID, "invalid job envelope")
+		return
+	}
+
 	var payload struct {
 		ID       string `json:"id"`
 		Content  string `json:"content"`
@@ -79,9 +87,10 @@ func (w *OpportunityWorker) handleMessage(ctx context.Context, msg queue.Message
 		} `json:"context"`
 	}
 
-	if err := json.Unmarshal([]byte(msg.Body), &payload); err != nil {
-		log.Printf("Error unmarshaling payload: %v\n", err)
-		_ = w.Queue.FailJob(ctx, msg.JobID, "invalid payload")
+	// Unmarshal the inner payload
+	if err := json.Unmarshal(job.Payload, &payload); err != nil {
+		log.Printf("Error unmarshaling inner payload: %v\n", err)
+		_ = w.Queue.FailJob(ctx, msg.JobID, "invalid inner payload")
 		return
 	}
 
@@ -136,9 +145,18 @@ OUTPUT JSON FORMAT: { 'executive_summary': 'string (in Portuguese)', 'mood': 'Ne
 
 	model := w.ModelName
 
-	responseJSON, err := w.Ollama.Generate(timeoutCtx, model, fullPrompt, "json")
+	responseJSON, err := w.Gemini.Generate(timeoutCtx, model, fullPrompt, "json")
 	if err != nil {
 		log.Printf("Error generating analysis: %v\n", err)
+
+		// Send error result to output queue
+		errorResult := models.JobResult{
+			JobId: job.JobId,
+			Type:  "opportunity_analysis",
+			Error: err.Error(),
+		}
+		_ = w.Queue.SendResult(ctx, job.JobId, errorResult)
+
 		_ = w.Queue.FailJob(ctx, msg.JobID, err.Error())
 		return
 	}
@@ -147,6 +165,14 @@ OUTPUT JSON FORMAT: { 'executive_summary': 'string (in Portuguese)', 'mood': 'Ne
 	var result map[string]interface{}
 	if err := json.Unmarshal([]byte(responseJSON), &result); err != nil {
 		log.Printf("Error unmarshaling LLM response: %v\n", err)
+
+		errorResult := models.JobResult{
+			JobId: job.JobId,
+			Type:  "opportunity_analysis",
+			Error: "invalid json from llm",
+		}
+		_ = w.Queue.SendResult(ctx, job.JobId, errorResult)
+
 		_ = w.Queue.FailJob(ctx, msg.JobID, "invalid json from llm")
 		return
 	}
@@ -159,24 +185,17 @@ OUTPUT JSON FORMAT: { 'executive_summary': 'string (in Portuguese)', 'mood': 'Ne
 	metadataJSON, _ := json.Marshal(metadata)
 
 	jobResult := models.JobResult{
-		JobId:    msg.JobID, // Use Redis JobID
+		JobId:    job.JobId, // Use the JobID from the envelope
 		Type:     "opportunity_analysis",
 		Metadata: metadataJSON,
 		Result:   result,
 	}
 
 	// Send to output queue (LLM_OUTPUT)
-	// IMPORTANT: Use payload.ID (UUID) as the Job ID for the output queue if possible, or a new UUID.
-	// But BullMQ expects unique Job IDs. If we use msg.JobID (e.g. "10"), it might conflict if we are not careful?
-	// Actually, BullMQ jobs usually have numeric IDs or UUIDs.
-	// The user checked "bull:LLM_OUTPUT:32f06a13..." which implies they expect the JobID to be the UUID.
-	// But we are passing msg.JobID ("10") to SendResult.
-	// So the key created is "bull:LLM_OUTPUT:10".
-	// To fix this and match user expectation (and likely avoid conflicts if multiple workers run),
-	// we should use the Message UUID as the JobID for the output queue, or a derived one.
-	// Let's use payload.ID (the UUID).
+	// Use payload.ID (UUID) as the key if needed, but for simple lists we just push.
+	// We pass job.JobId (UUID) for tracking.
 
-	if err := w.Queue.SendResult(ctx, payload.ID, jobResult); err != nil {
+	if err := w.Queue.SendResult(ctx, job.JobId, jobResult); err != nil {
 		log.Printf("Error sending result: %v\n", err)
 		_ = w.Queue.FailJob(ctx, msg.JobID, "failed to send result")
 		return
@@ -186,5 +205,5 @@ OUTPUT JSON FORMAT: { 'executive_summary': 'string (in Portuguese)', 'mood': 'Ne
 		log.Printf("Error completing job: %v\n", err)
 	}
 
-	log.Printf("Job %s completed successfully.\n", msg.JobID)
+	log.Printf("Job %s completed successfully.\n", job.JobId)
 }
