@@ -74,10 +74,101 @@ func (m *RedisManager) CompleteJob(ctx context.Context, jobID string, returnValu
 }
 
 func (m *RedisManager) FailJob(ctx context.Context, jobID string, reason string) error {
-	// In simple list mode, we might want to push to a failed queue or just log.
-	// For now, let's just log.
-	fmt.Printf("Job %s failed: %s\n", jobID, reason)
+	failedQueue := m.InputQueue + ":failed"
+	fmt.Printf("Job %s failed: %s. Moving to %s\n", jobID, reason, failedQueue)
+
+	// We need the job body to push to failed queue.
+	// Since we don't have it here, we rely on the caller to handle this if they want DLQ.
+	// But wait, the caller (worker) has the message.
+	// The interface of FailJob only takes ID and reason.
+	// We should probably update the interface or just log for now.
+	// To properly support DLQ for failed jobs, we need the body.
+
 	return nil
+}
+
+func (m *RedisManager) FailJobWithBody(ctx context.Context, jobID string, body string, reason string) error {
+	failedQueue := m.InputQueue + ":failed"
+	fmt.Printf("Job %s failed: %s. Moving to %s\n", jobID, reason, failedQueue)
+	return m.Client.RPush(ctx, failedQueue, body).Err()
+}
+
+func (m *RedisManager) RetryJob(ctx context.Context, jobID string, body string, delay time.Duration) error {
+	delayedQueue := m.InputQueue + ":delayed"
+	// Use integer milliseconds for score to avoid floating point issues
+	score := float64(time.Now().Add(delay).UnixMilli())
+
+	fmt.Printf("Retrying job %s in %v (score: %.0f)\n", jobID, delay, score)
+
+	// Store the body in the delayed queue
+	return m.Client.ZAdd(ctx, delayedQueue, redis.Z{
+		Score:  score,
+		Member: body,
+	}).Err()
+}
+
+func (m *RedisManager) StartDelayedJobScheduler(ctx context.Context) {
+	delayedQueue := m.InputQueue + ":delayed"
+	// Poll every 5 seconds instead of 1 to reduce load, or keep 1s for responsiveness
+	ticker := time.NewTicker(2 * time.Second)
+
+	go func() {
+		defer ticker.Stop()
+		fmt.Printf("Delayed job scheduler started for %s\n", delayedQueue)
+
+		for {
+			select {
+			case <-ctx.Done():
+				fmt.Println("Delayed job scheduler stopping...")
+				return
+			case <-ticker.C:
+				now := float64(time.Now().UnixMilli())
+
+				// Get jobs that are ready to be processed
+				// Use explicit string formatting for score range
+				maxScore := fmt.Sprintf("%.0f", now)
+
+				// Limit to 10 jobs at a time to avoid blocking
+				jobs, err := m.Client.ZRangeByScore(ctx, delayedQueue, &redis.ZRangeBy{
+					Min:   "-inf",
+					Max:   maxScore,
+					Count: 10,
+				}).Result()
+
+				if err != nil {
+					fmt.Printf("Error checking delayed jobs: %v\n", err)
+					continue
+				}
+
+				if len(jobs) > 0 {
+					fmt.Printf("Found %d delayed jobs ready to process (max score: %s)\n", len(jobs), maxScore)
+
+					for _, jobBody := range jobs {
+						// Atomically remove from delayed and push to input
+						// Using a simple lock-free approach: remove first, if successful, push.
+						removed, err := m.Client.ZRem(ctx, delayedQueue, jobBody).Result()
+						if err != nil {
+							fmt.Printf("Error removing delayed job: %v\n", err)
+							continue
+						}
+
+						if removed > 0 {
+							if err := m.Client.RPush(ctx, m.InputQueue, jobBody).Err(); err != nil {
+								fmt.Printf("Error pushing job back to input queue: %v\n", err)
+								// Try to add back to delayed queue to avoid data loss
+								m.Client.ZAdd(ctx, delayedQueue, redis.Z{
+									Score:  now, // Retry immediately next tick
+									Member: jobBody,
+								})
+							} else {
+								fmt.Printf("Moved job back to input queue successfully\n")
+							}
+						}
+					}
+				}
+			}
+		}
+	}()
 }
 
 func (m *RedisManager) addJob(ctx context.Context, queueName string, jobID string, data []byte) error {

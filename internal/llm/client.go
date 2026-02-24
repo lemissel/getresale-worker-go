@@ -11,6 +11,15 @@ import (
 	"time"
 )
 
+type RetryableError struct {
+	RetryDelay time.Duration
+	Err        error
+}
+
+func (e *RetryableError) Error() string {
+	return e.Err.Error()
+}
+
 type Client interface {
 	Generate(ctx context.Context, model, prompt, format string) (string, error)
 }
@@ -118,6 +127,18 @@ type geminiResponse struct {
 	Candidates []geminiCandidate `json:"candidates"`
 }
 
+type geminiErrorResponse struct {
+	Error struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Status  string `json:"status"`
+		Details []struct {
+			Type       string `json:"@type"`
+			RetryDelay string `json:"retryDelay,omitempty"`
+		} `json:"details"`
+	} `json:"error"`
+}
+
 func (c *GeminiClient) Generate(ctx context.Context, model, prompt, format string) (string, error) {
 	// Use default model if not provided or if it's a legacy Llama model name
 	if model == "" || model == "llama3.2" || model == "llama2" {
@@ -159,7 +180,31 @@ func (c *GeminiClient) Generate(ctx context.Context, model, prompt, format strin
 		body, _ := io.ReadAll(resp.Body)
 		// Redact key from URL for logging
 		redactedURL := strings.ReplaceAll(url, c.APIKey, "REDACTED")
-		return "", fmt.Errorf("gemini error (status %d) at %s: %s", resp.StatusCode, redactedURL, string(body))
+
+		baseErr := fmt.Errorf("gemini error (status %d) at %s: %s", resp.StatusCode, redactedURL, string(body))
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			var errResp geminiErrorResponse
+			if err := json.Unmarshal(body, &errResp); err == nil {
+				for _, detail := range errResp.Error.Details {
+					if detail.RetryDelay != "" {
+						if d, err := time.ParseDuration(detail.RetryDelay); err == nil {
+							return "", &RetryableError{
+								RetryDelay: d,
+								Err:        baseErr,
+							}
+						}
+					}
+				}
+			}
+			// If we couldn't parse delay but it's 429, default to a reasonable backoff
+			return "", &RetryableError{
+				RetryDelay: 30 * time.Second,
+				Err:        baseErr,
+			}
+		}
+
+		return "", baseErr
 	}
 
 	var res geminiResponse

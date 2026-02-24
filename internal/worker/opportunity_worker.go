@@ -33,6 +33,10 @@ func NewOpportunityWorker(queueManager *queue.RedisManager, gemini llm.Client, m
 
 func (w *OpportunityWorker) Start(ctx context.Context) {
 	log.Println("OpportunityWorker started...")
+
+	// Start delayed job scheduler
+	w.Queue.StartDelayedJobScheduler(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -68,7 +72,7 @@ func (w *OpportunityWorker) handleMessage(ctx context.Context, msg queue.Message
 		log.Printf("Error unmarshaling job envelope: %v\n", err)
 		// Fallback for legacy raw payloads (if any exist in queue)
 		// or just fail. Given we are migrating, let's assume new format.
-		_ = w.Queue.FailJob(ctx, msg.JobID, "invalid job envelope")
+		_ = w.Queue.FailJobWithBody(ctx, msg.JobID, msg.Body, "invalid job envelope")
 		return
 	}
 
@@ -90,7 +94,7 @@ func (w *OpportunityWorker) handleMessage(ctx context.Context, msg queue.Message
 	// Unmarshal the inner payload
 	if err := json.Unmarshal(job.Payload, &payload); err != nil {
 		log.Printf("Error unmarshaling inner payload: %v\n", err)
-		_ = w.Queue.FailJob(ctx, msg.JobID, "invalid inner payload")
+		_ = w.Queue.FailJobWithBody(ctx, msg.JobID, msg.Body, "invalid inner payload")
 		return
 	}
 
@@ -149,6 +153,15 @@ OUTPUT JSON FORMAT: { 'executive_summary': 'string (in Portuguese)', 'mood': 'Ne
 	if err != nil {
 		log.Printf("Error generating analysis: %v\n", err)
 
+		// Check for RetryableError
+		if retryErr, ok := err.(*llm.RetryableError); ok {
+			log.Printf("Rate limited. Retrying job %s in %v\n", msg.JobID, retryErr.RetryDelay)
+			if retryErr := w.Queue.RetryJob(ctx, msg.JobID, msg.Body, retryErr.RetryDelay); retryErr != nil {
+				log.Printf("Error queueing retry: %v\n", retryErr)
+			}
+			return
+		}
+
 		// Send error result to output queue
 		errorResult := models.JobResult{
 			JobId: job.JobId,
@@ -157,7 +170,7 @@ OUTPUT JSON FORMAT: { 'executive_summary': 'string (in Portuguese)', 'mood': 'Ne
 		}
 		_ = w.Queue.SendResult(ctx, job.JobId, errorResult)
 
-		_ = w.Queue.FailJob(ctx, msg.JobID, err.Error())
+		_ = w.Queue.FailJobWithBody(ctx, msg.JobID, msg.Body, err.Error())
 		return
 	}
 
@@ -173,7 +186,7 @@ OUTPUT JSON FORMAT: { 'executive_summary': 'string (in Portuguese)', 'mood': 'Ne
 		}
 		_ = w.Queue.SendResult(ctx, job.JobId, errorResult)
 
-		_ = w.Queue.FailJob(ctx, msg.JobID, "invalid json from llm")
+		_ = w.Queue.FailJobWithBody(ctx, msg.JobID, msg.Body, "invalid json from llm")
 		return
 	}
 
@@ -197,7 +210,7 @@ OUTPUT JSON FORMAT: { 'executive_summary': 'string (in Portuguese)', 'mood': 'Ne
 
 	if err := w.Queue.SendResult(ctx, job.JobId, jobResult); err != nil {
 		log.Printf("Error sending result: %v\n", err)
-		_ = w.Queue.FailJob(ctx, msg.JobID, "failed to send result")
+		_ = w.Queue.FailJobWithBody(ctx, msg.JobID, msg.Body, "failed to send result")
 		return
 	}
 

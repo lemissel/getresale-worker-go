@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.22-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
 
@@ -28,7 +28,8 @@ RUN apk add --no-cache ca-certificates tzdata
 
 # Copy binary from builder
 COPY --from=builder /app/worker .
-COPY --from=builder /app/.env.example .env
+# Copy .env file if it exists in builder (it was copied with COPY . .)
+COPY --from=builder /app/.env .env
 
 # Create a non-root user
 RUN adduser -D appuser
