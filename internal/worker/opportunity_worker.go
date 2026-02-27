@@ -128,7 +128,8 @@ func (w *OpportunityWorker) handleMessage(ctx context.Context, msg queue.Message
 Use the provided 'AVAILABLE SERVICES' (which include prices in BRL) to identify up-selling or cross-selling opportunities based on the client's needs and history.
 Calculate 'upsell_potential_brl' by summing the prices of the services you identify as potential opportunities for this client. If no specific service is identified or prices are missing, estimate a reasonable value or use 0.0.
 
-OUTPUT JSON FORMAT: { 'executive_summary': 'string (in Portuguese)', 'mood': 'Neutral/Positive/Negative (in Portuguese)', 'satisfaction': 'Operational/At Risk/High (in Portuguese)', 'notes': 'string (in Portuguese)', 'opportunities_risks': 'string (in Portuguese)', 'recommended_action_title': 'string (in Portuguese)', 'upsell_potential_brl': float64 }`
+OUTPUT JSON FORMAT: { 'executive_summary': 'string (in Portuguese)', 'mood': 'Neutral/Positive/Negative (in Portuguese)', 'satisfaction': 'Operational/At Risk/High (in Portuguese)', 'notes': 'string (in Portuguese)', 'opportunities_risks': 'string (in Portuguese)', 'recommended_action_title': 'string (in Portuguese)', 'upsell_potential_brl': float64 }
+STRICTLY RETURN ONLY THE JSON OBJECT. NO MARKDOWN. NO CODE BLOCKS. NO OTHER TEXT.`
 
 	servicesJSON, _ := json.Marshal(payload.Services)
 
