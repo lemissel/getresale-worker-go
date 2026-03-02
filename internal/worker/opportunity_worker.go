@@ -76,6 +76,17 @@ func (w *OpportunityWorker) handleMessage(ctx context.Context, msg queue.Message
 		return
 	}
 
+	// Parse Metadata to preserve context (companyId, etc.)
+	var metadata map[string]interface{}
+	if len(job.Metadata) > 0 {
+		if err := json.Unmarshal(job.Metadata, &metadata); err != nil {
+			log.Printf("Warning: failed to parse job metadata: %v\n", err)
+			metadata = make(map[string]interface{})
+		}
+	} else {
+		metadata = make(map[string]interface{})
+	}
+
 	var payload struct {
 		ID       string `json:"id"`
 		Content  string `json:"content"`
@@ -193,9 +204,7 @@ STRICTLY RETURN ONLY THE JSON OBJECT. NO MARKDOWN. NO CODE BLOCKS. NO OTHER TEXT
 
 	// Prepare result for output queue
 	// Create metadata with messageId for the consumer
-	metadata := map[string]string{
-		"messageId": payload.ID,
-	}
+	metadata["messageId"] = payload.ID
 	metadataJSON, _ := json.Marshal(metadata)
 
 	jobResult := models.JobResult{
