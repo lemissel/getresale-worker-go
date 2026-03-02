@@ -20,8 +20,16 @@ func (e *RetryableError) Error() string {
 	return e.Err.Error()
 }
 
+type TokenUsage struct {
+	PromptTokens     int     `json:"prompt_tokens"`
+	CandidateTokens  int     `json:"candidate_tokens"`
+	TotalTokens      int     `json:"total_tokens"`
+	CachedTokens     int     `json:"cached_tokens"`
+	EstimatedCostUSD float64 `json:"estimated_cost_usd"`
+}
+
 type Client interface {
-	Generate(ctx context.Context, model, prompt, format string) (string, error)
+	Generate(ctx context.Context, model, prompt, format string) (string, TokenUsage, error)
 }
 
 // OllamaClient
@@ -48,7 +56,7 @@ type ollamaResponse struct {
 	Response string `json:"response"`
 }
 
-func (c *OllamaClient) Generate(ctx context.Context, model, prompt, format string) (string, error) {
+func (c *OllamaClient) Generate(ctx context.Context, model, prompt, format string) (string, TokenUsage, error) {
 	reqBody := ollamaRequest{
 		Model:  model,
 		Prompt: prompt,
@@ -59,27 +67,29 @@ func (c *OllamaClient) Generate(ctx context.Context, model, prompt, format strin
 
 	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/api/generate", c.BaseURL), bytes.NewBuffer(data))
 	if err != nil {
-		return "", err
+		return "", TokenUsage{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return "", err
+		return "", TokenUsage{}, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("ollama error (status %d): %s", resp.StatusCode, string(body))
+		return "", TokenUsage{}, fmt.Errorf("ollama error (status %d): %s", resp.StatusCode, string(body))
 	}
 
 	var res ollamaResponse
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		return "", err
+		return "", TokenUsage{}, err
 	}
 
-	return res.Response, nil
+	// Ollama is local, so cost is 0. Token usage is not always returned in simple generate endpoint unless requested?
+	// For now return empty usage or 0 cost.
+	return res.Response, TokenUsage{}, nil
 }
 
 // GeminiClient
@@ -123,8 +133,16 @@ type geminiCandidate struct {
 	Content geminiContent `json:"content"`
 }
 
+type geminiUsageMetadata struct {
+	PromptTokenCount        int `json:"promptTokenCount"`
+	CandidatesTokenCount    int `json:"candidatesTokenCount"`
+	TotalTokenCount         int `json:"totalTokenCount"`
+	CachedContentTokenCount int `json:"cachedContentTokenCount,omitempty"`
+}
+
 type geminiResponse struct {
-	Candidates []geminiCandidate `json:"candidates"`
+	Candidates    []geminiCandidate   `json:"candidates"`
+	UsageMetadata geminiUsageMetadata `json:"usageMetadata"`
 }
 
 type geminiErrorResponse struct {
@@ -139,7 +157,7 @@ type geminiErrorResponse struct {
 	} `json:"error"`
 }
 
-func (c *GeminiClient) Generate(ctx context.Context, model, prompt, format string) (string, error) {
+func (c *GeminiClient) Generate(ctx context.Context, model, prompt, format string) (string, TokenUsage, error) {
 	// Use default model if not provided or if it's a legacy Llama model name
 	if model == "" || model == "llama3.2" || model == "llama2" {
 		model = c.DefaultModel
@@ -166,13 +184,13 @@ func (c *GeminiClient) Generate(ctx context.Context, model, prompt, format strin
 	url := fmt.Sprintf("%s/models/%s:generateContent?key=%s", c.BaseURL, model, c.APIKey)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(data))
 	if err != nil {
-		return "", err
+		return "", TokenUsage{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return "", err
+		return "", TokenUsage{}, err
 	}
 	defer resp.Body.Close()
 
@@ -189,7 +207,7 @@ func (c *GeminiClient) Generate(ctx context.Context, model, prompt, format strin
 				for _, detail := range errResp.Error.Details {
 					if detail.RetryDelay != "" {
 						if d, err := time.ParseDuration(detail.RetryDelay); err == nil {
-							return "", &RetryableError{
+							return "", TokenUsage{}, &RetryableError{
 								RetryDelay: d,
 								Err:        baseErr,
 							}
@@ -198,25 +216,55 @@ func (c *GeminiClient) Generate(ctx context.Context, model, prompt, format strin
 				}
 			}
 			// If we couldn't parse delay but it's 429, default to a reasonable backoff
-			return "", &RetryableError{
+			return "", TokenUsage{}, &RetryableError{
 				RetryDelay: 30 * time.Second,
 				Err:        baseErr,
 			}
 		}
 
-		return "", baseErr
+		return "", TokenUsage{}, baseErr
 	}
 
 	var res geminiResponse
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		return "", err
+		return "", TokenUsage{}, err
 	}
 
 	if len(res.Candidates) == 0 || len(res.Candidates[0].Content.Parts) == 0 {
-		return "", fmt.Errorf("gemini returned no content")
+		return "", TokenUsage{}, fmt.Errorf("gemini returned no content")
 	}
 
-	return res.Candidates[0].Content.Parts[0].Text, nil
+	usage := TokenUsage{
+		PromptTokens:    res.UsageMetadata.PromptTokenCount,
+		CandidateTokens: res.UsageMetadata.CandidatesTokenCount,
+		TotalTokens:     res.UsageMetadata.TotalTokenCount,
+		CachedTokens:    res.UsageMetadata.CachedContentTokenCount,
+	}
+
+	// Calculate cost (Gemini 1.5 Flash Pricing as proxy)
+	// Input: $0.075 / 1M
+	// Output: $0.30 / 1M
+	// Cached Input: $0.01875 / 1M
+	inputCostPerMillion := 0.075
+	outputCostPerMillion := 0.30
+	cachedInputCostPerMillion := 0.01875
+
+	// Adjust for other models if needed
+	if strings.Contains(model, "pro") {
+		// Gemini 1.5 Pro
+		// Input: $3.50 / 1M
+		// Output: $10.50 / 1M
+		// Cached Input: $0.875 / 1M
+		inputCostPerMillion = 3.50
+		outputCostPerMillion = 10.50
+		cachedInputCostPerMillion = 0.875
+	}
+
+	usage.EstimatedCostUSD = (float64(usage.PromptTokens)/1_000_000)*inputCostPerMillion +
+		(float64(usage.CandidateTokens)/1_000_000)*outputCostPerMillion +
+		(float64(usage.CachedTokens)/1_000_000)*cachedInputCostPerMillion
+
+	return res.Candidates[0].Content.Parts[0].Text, usage, nil
 }
 
 // OpenAIClient (Simple HTTP implementation to avoid extra dependencies for now)
@@ -247,15 +295,22 @@ type openAIRequest struct {
 	Messages []openAIMessage `json:"messages"`
 }
 
+type openAIUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
 type openAIChoice struct {
 	Message openAIMessage `json:"message"`
 }
 
 type openAIResponse struct {
 	Choices []openAIChoice `json:"choices"`
+	Usage   openAIUsage    `json:"usage"`
 }
 
-func (c *OpenAIClient) Generate(ctx context.Context, model, prompt, format string) (string, error) {
+func (c *OpenAIClient) Generate(ctx context.Context, model, prompt, format string) (string, TokenUsage, error) {
 	reqBody := openAIRequest{
 		Model: model,
 		Messages: []openAIMessage{
@@ -270,23 +325,46 @@ func (c *OpenAIClient) Generate(ctx context.Context, model, prompt, format strin
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return "", err
+		return "", TokenUsage{}, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("openai error (status %d): %s", resp.StatusCode, string(body))
+		return "", TokenUsage{}, fmt.Errorf("openai error (status %d): %s", resp.StatusCode, string(body))
 	}
 
 	var res openAIResponse
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		return "", err
+		return "", TokenUsage{}, err
 	}
 
 	if len(res.Choices) == 0 {
-		return "", fmt.Errorf("openai returned no choices")
+		return "", TokenUsage{}, fmt.Errorf("openai returned no choices")
 	}
 
-	return res.Choices[0].Message.Content, nil
+	usage := TokenUsage{
+		PromptTokens:    res.Usage.PromptTokens,
+		CandidateTokens: res.Usage.CompletionTokens,
+		TotalTokens:     res.Usage.TotalTokens,
+	}
+
+	// Cost calculation for OpenAI
+	var inputCost, outputCost float64
+	if model == "gpt-4o" {
+		inputCost = 5.00
+		outputCost = 15.00
+	} else if model == "gpt-4" {
+		inputCost = 30.00
+		outputCost = 60.00
+	} else {
+		// GPT-3.5 Turbo or others
+		inputCost = 0.50
+		outputCost = 1.50
+	}
+
+	usage.EstimatedCostUSD = (float64(usage.PromptTokens)/1_000_000)*inputCost +
+		(float64(usage.CandidateTokens)/1_000_000)*outputCost
+
+	return res.Choices[0].Message.Content, usage, nil
 }

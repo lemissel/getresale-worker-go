@@ -74,14 +74,15 @@ func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) {
 	log.Printf("Processing job %s (%s)...\n", job.JobId, job.Type)
 
 	var result string
+	var usage llm.TokenUsage
 	var err error
 
 	// Decide which client to use
 	if payload.Model == "whisper-1" || payload.Model == "gpt-4o" || payload.Model == "gpt-4" {
-		result, err = w.OpenAI.Generate(ctx, payload.Model, payload.Prompt, payload.Format)
+		result, usage, err = w.OpenAI.Generate(ctx, payload.Model, payload.Prompt, payload.Format)
 	} else {
 		// Default to Gemini for everything else (replacing Llama)
-		result, err = w.Gemini.Generate(ctx, payload.Model, payload.Prompt, payload.Format)
+		result, usage, err = w.Gemini.Generate(ctx, payload.Model, payload.Prompt, payload.Format)
 	}
 
 	jobResult := models.JobResult{
@@ -96,6 +97,14 @@ func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) {
 		_ = w.Queue.FailJob(ctx, msg.JobID, err.Error())
 	} else {
 		jobResult.Result = result
+		jobResult.Usage = &models.Usage{
+			PromptTokens:     usage.PromptTokens,
+			CandidateTokens:  usage.CandidateTokens,
+			TotalTokens:      usage.TotalTokens,
+			CachedTokens:     usage.CachedTokens,
+			EstimatedCostUSD: usage.EstimatedCostUSD,
+			Model:            payload.Model,
+		}
 		if err := w.Queue.SendResult(ctx, msg.JobID, jobResult); err != nil {
 			log.Printf("Error sending result for job %s: %v\n", job.JobId, err)
 			_ = w.Queue.FailJob(ctx, msg.JobID, "failed to enqueue output")

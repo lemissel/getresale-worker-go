@@ -150,7 +150,7 @@ STRICTLY RETURN ONLY THE JSON OBJECT. NO MARKDOWN. NO CODE BLOCKS. NO OTHER TEXT
 
 	model := w.ModelName
 
-	responseJSON, err := w.Gemini.Generate(timeoutCtx, model, fullPrompt, "json")
+	responseJSON, usage, err := w.Gemini.Generate(timeoutCtx, model, fullPrompt, "json")
 	if err != nil {
 		log.Printf("Error generating analysis: %v\n", err)
 
@@ -203,6 +203,14 @@ STRICTLY RETURN ONLY THE JSON OBJECT. NO MARKDOWN. NO CODE BLOCKS. NO OTHER TEXT
 		Type:     "opportunity_analysis",
 		Metadata: metadataJSON,
 		Result:   result,
+		Usage: &models.Usage{
+			PromptTokens:     usage.PromptTokens,
+			CandidateTokens:  usage.CandidateTokens,
+			TotalTokens:      usage.TotalTokens,
+			CachedTokens:     usage.CachedTokens,
+			EstimatedCostUSD: usage.EstimatedCostUSD,
+			Model:            model,
+		},
 	}
 
 	// Send to output queue (LLM_OUTPUT)
