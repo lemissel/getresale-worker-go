@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -71,7 +72,40 @@ func (c *OllamaClient) Generate(ctx context.Context, model, prompt, format strin
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.HTTP.Do(req)
+	var resp *http.Response
+	maxRetries := 3
+	baseDelay := 1 * time.Second
+
+	for i := 0; i <= maxRetries; i++ {
+		if i > 0 {
+			time.Sleep(baseDelay * time.Duration(1<<uint(i-1))) // Exponential backoff: 1s, 2s, 4s
+			log.Printf("Retrying Gemini request (attempt %d/%d) after error...", i+1, maxRetries+1)
+		}
+
+		resp, err = c.HTTP.Do(req)
+		if err != nil {
+			// Network error, retry
+			log.Printf("Gemini network error: %v", err)
+			continue
+		}
+
+		if resp.StatusCode >= 500 {
+			// Server error, retry
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			log.Printf("Gemini server error (status %d): %s", resp.StatusCode, string(body))
+			// Re-create body for next attempt if needed?
+			// Wait, http.Request.Body is a ReadCloser. If we read it, we can't read it again for the next retry unless we rewind it.
+			// bytes.NewBuffer(data) creates a Reader that is consumed.
+			// We need to reset the request body for retries.
+			req.Body = io.NopCloser(bytes.NewBuffer(data))
+			continue
+		}
+
+		// If success or non-retriable error (e.g. 400, 401, 429 handled later), break
+		break
+	}
+
 	if err != nil {
 		return "", TokenUsage{}, err
 	}
@@ -188,10 +222,39 @@ func (c *GeminiClient) Generate(ctx context.Context, model, prompt, format strin
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return "", TokenUsage{}, err
+	var resp *http.Response
+	maxRetries := 3
+	baseDelay := 1 * time.Second
+
+	for i := 0; i <= maxRetries; i++ {
+		if i > 0 {
+			time.Sleep(baseDelay * time.Duration(1<<uint(i-1))) // Exponential backoff: 1s, 2s, 4s
+			// Reset request body for retry
+			req.Body = io.NopCloser(bytes.NewBuffer(data))
+		}
+
+		resp, err = c.HTTP.Do(req)
+		if err != nil {
+			// Network error, retry
+			if i < maxRetries {
+				continue
+			}
+			return "", TokenUsage{}, err
+		}
+
+		if resp.StatusCode >= 500 {
+			// Server error, retry
+			if i < maxRetries {
+				resp.Body.Close()
+				continue
+			}
+			// If max retries reached, let it fall through to error handling below
+		}
+
+		// If success or non-retriable error (e.g. 400, 401, 429 handled later), break
+		break
 	}
+
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
