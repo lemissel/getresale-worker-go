@@ -94,10 +94,6 @@ func (c *OllamaClient) Generate(ctx context.Context, model, prompt, format strin
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			log.Printf("Gemini server error (status %d): %s", resp.StatusCode, string(body))
-			// Re-create body for next attempt if needed?
-			// Wait, http.Request.Body is a ReadCloser. If we read it, we can't read it again for the next retry unless we rewind it.
-			// bytes.NewBuffer(data) creates a Reader that is consumed.
-			// We need to reset the request body for retries.
 			req.Body = io.NopCloser(bytes.NewBuffer(data))
 			continue
 		}
@@ -121,8 +117,6 @@ func (c *OllamaClient) Generate(ctx context.Context, model, prompt, format strin
 		return "", TokenUsage{}, err
 	}
 
-	// Ollama is local, so cost is 0. Token usage is not always returned in simple generate endpoint unless requested?
-	// For now return empty usage or 0 cost.
 	return res.Response, TokenUsage{}, nil
 }
 
@@ -146,12 +140,13 @@ func NewGeminiClient(apiKey, defaultModel string) *GeminiClient {
 	}
 }
 
-type geminiPart struct {
+type GeminiPart struct {
 	Text string `json:"text"`
 }
 
-type geminiContent struct {
-	Parts []geminiPart `json:"parts"`
+type GeminiContent struct {
+	Parts []GeminiPart `json:"parts"`
+	Role  string       `json:"role,omitempty"`
 }
 
 type geminiGenerationConfig struct {
@@ -159,12 +154,13 @@ type geminiGenerationConfig struct {
 }
 
 type geminiRequest struct {
-	Contents         []geminiContent         `json:"contents"`
+	Contents         []GeminiContent         `json:"contents,omitempty"`
 	GenerationConfig *geminiGenerationConfig `json:"generationConfig,omitempty"`
+	CachedContent    string                  `json:"cachedContent,omitempty"`
 }
 
 type geminiCandidate struct {
-	Content geminiContent `json:"content"`
+	Content GeminiContent `json:"content"`
 }
 
 type geminiUsageMetadata struct {
@@ -191,20 +187,73 @@ type geminiErrorResponse struct {
 	} `json:"error"`
 }
 
+type GeminiCachedContent struct {
+	Name        string          `json:"name"`
+	DisplayName string          `json:"displayName"`
+	Model       string          `json:"model"`
+	Contents    []GeminiContent `json:"contents"`
+	TTL         string          `json:"ttl"`
+	ExpireTime  string          `json:"expireTime,omitempty"`
+}
+
+func (c *GeminiClient) CreateCache(ctx context.Context, model, displayName string, contents []GeminiContent, ttlSeconds int) (*GeminiCachedContent, error) {
+	reqBody := GeminiCachedContent{
+		Model:       fmt.Sprintf("models/%s", model),
+		DisplayName: displayName,
+		Contents:    contents,
+		TTL:         fmt.Sprintf("%ds", ttlSeconds),
+	}
+	data, _ := json.Marshal(reqBody)
+
+	url := fmt.Sprintf("%s/cachedContents?key=%s", c.BaseURL, c.APIKey)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(data))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("gemini create cache error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var res GeminiCachedContent
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return nil, err
+	}
+
+	return &res, nil
+}
+
 func (c *GeminiClient) Generate(ctx context.Context, model, prompt, format string) (string, TokenUsage, error) {
+	return c.GenerateWithCache(ctx, model, prompt, format, "")
+}
+
+func (c *GeminiClient) GenerateWithCache(ctx context.Context, model, prompt, format, cachedContentName string) (string, TokenUsage, error) {
 	// Use default model if not provided or if it's a legacy Llama model name
 	if model == "" || model == "llama3.2" || model == "llama2" {
 		model = c.DefaultModel
 	}
 
 	reqBody := geminiRequest{
-		Contents: []geminiContent{
+		Contents: []GeminiContent{
 			{
-				Parts: []geminiPart{
+				Parts: []GeminiPart{
 					{Text: prompt},
 				},
+				Role: "user",
 			},
 		},
+	}
+
+	if cachedContentName != "" {
+		reqBody.CachedContent = cachedContentName
 	}
 
 	if format == "json" {

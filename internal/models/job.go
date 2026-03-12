@@ -10,9 +10,15 @@ type Job struct {
 }
 
 type LLMPayload struct {
-	Prompt string `json:"prompt"`
-	Model  string `json:"model"`
-	Format string `json:"format"`
+	Prompt   string `json:"prompt"`
+	Model    string `json:"model"`
+	Format   string `json:"format"`
+	Context  string `json:"context,omitempty"`   // For raw text context to be cached
+	Messages []struct {                          // For structured messages to be cached/minified
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	} `json:"messages,omitempty"`
+	CacheKey string `json:"cacheKey,omitempty"` // remoteJid or unique ID for caching
 }
 
 type Usage struct {
